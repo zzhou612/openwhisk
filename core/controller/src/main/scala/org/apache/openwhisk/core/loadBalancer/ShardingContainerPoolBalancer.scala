@@ -21,7 +21,7 @@ import akka.actor.ActorRef
 import akka.actor.ActorRefFactory
 import java.util.concurrent.ThreadLocalRandom
 
-import akka.actor.{Actor, ActorSystem, Cancellable, Props}
+import akka.actor.{Actor, ActorSystem, Props}
 import akka.cluster.ClusterEvent._
 import akka.cluster.{Cluster, Member, MemberStatus}
 import akka.management.scaladsl.AkkaManagement
@@ -42,7 +42,6 @@ import org.apache.openwhisk.spi.SpiLoader
 
 import scala.annotation.tailrec
 import scala.concurrent.Future
-import scala.concurrent.duration.FiniteDuration
 
 /**
  * A loadbalancer that schedules workload based on a hashing-algorithm.
@@ -205,7 +204,7 @@ class ShardingContainerPoolBalancer(
   }
 
   /** State needed for scheduling. */
-  val schedulingState = ShardingContainerPoolBalancerState()(lbConfig)
+  val schedulingState = ShardingContainerPoolBalancerState()(lbConfig, cpuLimitConfig)
 
   /**
    * Monitors invoker supervision and the cluster to update the state sequentially
@@ -270,8 +269,10 @@ class ShardingContainerPoolBalancer(
         action.limits.concurrency.maxConcurrent,
         action.fullyQualifiedName(true),
         invokersToUse,
-        schedulingState.invokerSlots,
-        action.limits.memory.megabytes,
+        if (cpuLimitConfig.controlEnabled) schedulingState.invokerCPUSlots
+        else schedulingState.invokerMemorySlots,
+        if (cpuLimitConfig.controlEnabled) CPULimitUtils.threadsToPermits(action.limits.cpu.threads)
+        else action.limits.memory.megabytes,
         homeInvoker,
         stepSize)
       invoker.foreach {
@@ -291,14 +292,20 @@ class ShardingContainerPoolBalancer(
 
     chosen
       .map { invoker =>
-        // MemoryLimit() and TimeLimit() return singletons - they should be fast enough to be used here
+        // CPULimit() and MemoryLimit() and TimeLimit() return singletons - they should be fast enough to be used here
+        val cpuLimit = action.limits.cpu
+        val cpuLimitInfo = if (cpuLimit == CPULimit()) { "std" } else { "non-std" }
         val memoryLimit = action.limits.memory
         val memoryLimitInfo = if (memoryLimit == MemoryLimit()) { "std" } else { "non-std" }
         val timeLimit = action.limits.timeout
         val timeLimitInfo = if (timeLimit == TimeLimit()) { "std" } else { "non-std" }
         logging.info(
           this,
-          s"scheduled activation ${msg.activationId}, action '${msg.action.asString}' ($actionType), ns '${msg.user.namespace.name.asString}', mem limit ${memoryLimit.megabytes} MB (${memoryLimitInfo}), time limit ${timeLimit.duration.toMillis} ms (${timeLimitInfo}) to ${invoker}")
+          if (cpuLimitConfig.controlEnabled) {
+            s"scheduled activation ${msg.activationId}, action '${msg.action.asString}' ($actionType), ns '${msg.user.namespace.name.asString}', " + s"cpu limit ${cpuLimit.threads} cpuThreads (${cpuLimitInfo}), mem limit ${memoryLimit.megabytes} MB (${memoryLimitInfo}), time limit ${timeLimit.duration.toMillis} ms (${timeLimitInfo}) to ${invoker}"
+          } else {
+            s"scheduled activation ${msg.activationId}, action '${msg.action.asString}' ($actionType), ns '${msg.user.namespace.name.asString}', mem limit ${memoryLimit.megabytes} MB (${memoryLimitInfo}), time limit ${timeLimit.duration.toMillis} ms (${timeLimitInfo}) to ${invoker}"
+          })
         val activationResult = setupActivation(msg, action, invoker)
         sendActivationToInvoker(messageProducer, msg, invoker).map(_ => activationResult)
       }
@@ -325,9 +332,16 @@ class ShardingContainerPoolBalancer(
       Some(monitor))
 
   override protected def releaseInvoker(invoker: InvokerInstanceId, entry: ActivationEntry) = {
-    schedulingState.invokerSlots
+    schedulingState.invokerMemorySlots
       .lift(invoker.toInt)
       .foreach(_.releaseConcurrent(entry.fullyQualifiedEntityName, entry.maxConcurrent, entry.memoryLimit.toMB.toInt))
+    schedulingState.invokerCPUSlots
+      .lift(invoker.toInt)
+      .foreach(
+        _.releaseConcurrent(
+          entry.fullyQualifiedEntityName,
+          entry.maxConcurrent,
+          CPULimitUtils.threadsToPermits(entry.cpuLimit)))
   }
 }
 
@@ -452,11 +466,13 @@ case class ShardingContainerPoolBalancerState(
   private var _blackboxInvokers: IndexedSeq[InvokerHealth] = IndexedSeq.empty[InvokerHealth],
   private var _managedStepSizes: Seq[Int] = ShardingContainerPoolBalancer.pairwiseCoprimeNumbersUntil(0),
   private var _blackboxStepSizes: Seq[Int] = ShardingContainerPoolBalancer.pairwiseCoprimeNumbersUntil(0),
-  protected[loadBalancer] var _invokerSlots: IndexedSeq[NestedSemaphore[FullyQualifiedEntityName]] =
-    IndexedSeq.empty[NestedSemaphore[FullyQualifiedEntityName]],
-  private var _clusterSize: Int = 1)(
-  lbConfig: ShardingContainerPoolBalancerConfig =
-    loadConfigOrThrow[ShardingContainerPoolBalancerConfig](ConfigKeys.loadbalancer))(implicit logging: Logging) {
+  private var _clusterSize: Int = 1,
+  protected[loadBalancer] var _invokerMemorySlots: IndexedSeq[NestedMemorySemaphore[FullyQualifiedEntityName]] =
+    IndexedSeq.empty[NestedMemorySemaphore[FullyQualifiedEntityName]],
+  protected[loadBalancer] var _invokerCPUSlots: IndexedSeq[NestedCPUSemaphore[FullyQualifiedEntityName]] =
+    IndexedSeq.empty[NestedCPUSemaphore[FullyQualifiedEntityName]])(
+  lbConfig: ContainerPoolBalancerConfig = loadConfigOrThrow[ContainerPoolBalancerConfig](ConfigKeys.loadbalancer),
+  cpuLimitConfig: CPULimitConfig = loadConfigOrThrow[CPULimitConfig](ConfigKeys.cpu))(implicit logging: Logging) {
 
   // Managed fraction and blackbox fraction can be between 0.0 and 1.0. The sum of these two fractions has to be between
   // 1.0 and 2.0.
@@ -475,7 +491,8 @@ case class ShardingContainerPoolBalancerState(
   def blackboxInvokers: IndexedSeq[InvokerHealth] = _blackboxInvokers
   def managedStepSizes: Seq[Int] = _managedStepSizes
   def blackboxStepSizes: Seq[Int] = _blackboxStepSizes
-  def invokerSlots: IndexedSeq[NestedSemaphore[FullyQualifiedEntityName]] = _invokerSlots
+  def invokerMemorySlots: IndexedSeq[NestedMemorySemaphore[FullyQualifiedEntityName]] = _invokerMemorySlots
+  def invokerCPUSlots: IndexedSeq[NestedCPUSemaphore[FullyQualifiedEntityName]] = _invokerCPUSlots
   def clusterSize: Int = _clusterSize
 
   /**
@@ -494,6 +511,24 @@ case class ShardingContainerPoolBalancerState(
       MemoryLimit.MIN_MEMORY
     } else {
       invokerShardMemorySize
+    }
+    newTreshold
+  }
+
+  /**
+   * @param cpuThreads
+   * @return calculated invoker slot
+   */
+  private def getInvokerSlotByCPU(cpuThreads: Float): Float = {
+    val invokerShardCPUSize = cpuThreads / _clusterSize
+    val newTreshold = if (invokerShardCPUSize < CPULimit.MIN_CPU) {
+      logging.error(
+        this,
+        s"registered controllers: calculated controller's invoker shard CPU size falls below the min CPU threads of one action. Setting to min CPU. Expect invoker overloads. Cluster size ${_clusterSize}, invoker CPU threads ${cpuThreads}, min action CPU threads ${CPULimit.MIN_CPU}, calculated shard size ${invokerShardCPUSize}.")(
+        TransactionId.loadbalancer)
+      CPULimit.MIN_CPU
+    } else {
+      invokerShardCPUSize
     }
     newTreshold
   }
@@ -528,14 +563,17 @@ case class ShardingContainerPoolBalancerState(
 
       if (oldSize < newSize) {
         // Keeps the existing state..
-        val onlyNewInvokers = _invokers.drop(_invokerSlots.length)
-        _invokerSlots = _invokerSlots ++ onlyNewInvokers.map { invoker =>
-          new NestedSemaphore[FullyQualifiedEntityName](getInvokerSlot(invoker.id.userMemory).toMB.toInt)
+        val onlyNewInvokers = _invokers.drop(_invokerMemorySlots.length)
+        _invokerMemorySlots = _invokerMemorySlots ++ onlyNewInvokers.map { invoker =>
+          new NestedMemorySemaphore[FullyQualifiedEntityName](getInvokerSlot(invoker.id.userMemory).toMB.toInt)
+        }
+        _invokerCPUSlots = _invokerCPUSlots ++ onlyNewInvokers.map { invoker =>
+          new NestedCPUSemaphore[FullyQualifiedEntityName](getInvokerSlotByCPU(invoker.id.cpuThreads))
         }
         val newInvokerDetails = onlyNewInvokers
           .map(i =>
-            s"${i.id.toString}: ${i.status} / ${getInvokerSlot(i.id.userMemory).toMB.MB} of ${i.id.userMemory.toMB.MB}")
-          .mkString(", ")
+            s"${i.id.toString}: ${i.status} / ${getInvokerSlot(i.id.userMemory).toMB.MB} of ${i.id.userMemory.toMB.MB} MB / ${getInvokerSlotByCPU(
+              i.id.cpuThreads)} of ${i.id.cpuThreads} cpuThreads")
         s"number of known invokers increased: new = $newSize, old = $oldSize. details: $newInvokerDetails."
       } else {
         s"number of known invokers decreased: new = $newSize, old = $oldSize."
@@ -563,8 +601,11 @@ case class ShardingContainerPoolBalancerState(
     if (_clusterSize != actualSize) {
       val oldSize = _clusterSize
       _clusterSize = actualSize
-      _invokerSlots = _invokers.map { invoker =>
-        new NestedSemaphore[FullyQualifiedEntityName](getInvokerSlot(invoker.id.userMemory).toMB.toInt)
+      _invokerMemorySlots = _invokers.map { invoker =>
+        new NestedMemorySemaphore[FullyQualifiedEntityName](getInvokerSlot(invoker.id.userMemory).toMB.toInt)
+      }
+      _invokerCPUSlots = _invokers.map { invoker =>
+        new NestedCPUSemaphore[FullyQualifiedEntityName](getInvokerSlotByCPU(invoker.id.cpuThreads))
       }
       // Directly after startup, no invokers have registered yet. This needs to be handled gracefully.
       val invokerCount = _invokers.size
@@ -576,9 +617,17 @@ case class ShardingContainerPoolBalancerState(
         } else {
           0.MB
         }
+      val totalInvokerCPU =
+        _invokers.foldLeft(0.toFloat)((total, invoker) => total + getInvokerSlotByCPU(invoker.id.cpuThreads))
+      val averageInvokerCPU: Float =
+        if (totalInvokerCPU > 0 && invokerCount > 0) {
+          totalInvokerCPU / invokerCount
+        } else {
+          0
+        }
       logging.info(
         this,
-        s"loadbalancer cluster size changed from $oldSize to $actualSize active nodes. ${invokerCount} invokers with ${averageInvokerMemory} average memory size - total invoker memory ${totalInvokerMemory}.")(
+        s"loadbalancer cluster size changed from $oldSize to $actualSize active nodes. ${invokerCount} invokers with ${averageInvokerMemory} average memory size - total invoker memory ${totalInvokerMemory}, and ${averageInvokerCPU} average CPU threads - total invoker CPU threads ${totalInvokerCPU}.")(
         TransactionId.loadbalancer)
     }
   }
@@ -591,39 +640,39 @@ case class ShardingContainerPoolBalancerState(
  */
 case class ClusterConfig(useClusterBootstrap: Boolean)
 
-/**
- * Configuration for the sharding container pool balancer.
- *
- * @param blackboxFraction the fraction of all invokers to use exclusively for blackboxes
- * @param timeoutFactor factor to influence the timeout period for forced active acks (time-limit.std * timeoutFactor + timeoutAddon)
- * @param timeoutAddon extra time to influence the timeout period for forced active acks (time-limit.std * timeoutFactor + timeoutAddon)
- */
-case class ShardingContainerPoolBalancerConfig(managedFraction: Double,
-                                               blackboxFraction: Double,
-                                               timeoutFactor: Int,
-                                               timeoutAddon: FiniteDuration)
+// /**
+//  * Configuration for the sharding container pool balancer.
+//  *
+//  * @param blackboxFraction the fraction of all invokers to use exclusively for blackboxes
+//  * @param timeoutFactor factor to influence the timeout period for forced active acks (time-limit.std * timeoutFactor + timeoutAddon)
+//  * @param timeoutAddon extra time to influence the timeout period for forced active acks (time-limit.std * timeoutFactor + timeoutAddon)
+//  */
+// case class ShardingContainerPoolBalancerConfig(managedFraction: Double,
+//                                                blackboxFraction: Double,
+//                                                timeoutFactor: Int,
+//                                                timeoutAddon: FiniteDuration)
 
-/**
- * State kept for each activation slot until completion.
- *
- * @param id id of the activation
- * @param namespaceId namespace that invoked the action
- * @param invokerName invoker the action is scheduled to
- * @param memoryLimit memory limit of the invoked action
- * @param timeLimit time limit of the invoked action
- * @param maxConcurrent concurrency limit of the invoked action
- * @param fullyQualifiedEntityName fully qualified name of the invoked action
- * @param timeoutHandler times out completion of this activation, should be canceled on good paths
- * @param isBlackbox true if the invoked action is a blackbox action, otherwise false (managed action)
- * @param isBlocking true if the action is invoked in a blocking fashion, i.e. "somebody" waits for the result
- */
-case class ActivationEntry(id: ActivationId,
-                           namespaceId: UUID,
-                           invokerName: InvokerInstanceId,
-                           memoryLimit: ByteSize,
-                           timeLimit: FiniteDuration,
-                           maxConcurrent: Int,
-                           fullyQualifiedEntityName: FullyQualifiedEntityName,
-                           timeoutHandler: Cancellable,
-                           isBlackbox: Boolean,
-                           isBlocking: Boolean)
+// /**
+//  * State kept for each activation slot until completion.
+//  *
+//  * @param id id of the activation
+//  * @param namespaceId namespace that invoked the action
+//  * @param invokerName invoker the action is scheduled to
+//  * @param memoryLimit memory limit of the invoked action
+//  * @param timeLimit time limit of the invoked action
+//  * @param maxConcurrent concurrency limit of the invoked action
+//  * @param fullyQualifiedEntityName fully qualified name of the invoked action
+//  * @param timeoutHandler times out completion of this activation, should be canceled on good paths
+//  * @param isBlackbox true if the invoked action is a blackbox action, otherwise false (managed action)
+//  * @param isBlocking true if the action is invoked in a blocking fashion, i.e. "somebody" waits for the result
+//  */
+// case class ActivationEntry(id: ActivationId,
+//                            namespaceId: UUID,
+//                            invokerName: InvokerInstanceId,
+//                            memoryLimit: ByteSize,
+//                            timeLimit: FiniteDuration,
+//                            maxConcurrent: Int,
+//                            fullyQualifiedEntityName: FullyQualifiedEntityName,
+//                            timeoutHandler: Cancellable,
+//                            isBlackbox: Boolean,
+//                            isBlocking: Boolean)

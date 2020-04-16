@@ -151,6 +151,115 @@ object DockerContainer {
       }
     } yield new DockerContainer(id, ip, useRunc)
   }
+
+  /**
+   * Creates a container running on a docker daemon.
+   *
+   * @param transID transaction creating the container
+   * @param image either a user provided (Left) or OpenWhisk provided (Right) image
+   * @param memory memorylimit of the container
+   * @param cpu CPU threads limit for the container
+   * @param environment environment variables to set on the container
+   * @param network network to launch the container in
+   * @param dnsServers list of dns servers to use in the container
+   * @param name optional name for the container
+   * @param useRunc use docker-runc to pause/unpause container?
+   * @return a Future which either completes with a DockerContainer or one of two specific failures
+   */
+  def createByCPU(transid: TransactionId,
+             image: Either[ImageName, ImageName],
+             registryConfig: Option[RuntimesRegistryConfig] = None,
+             memory: ByteSize = 256.MB,
+             cpu: Float = (0.2).toFloat,
+             environment: Map[String, String] = Map.empty,
+             network: String = "bridge",
+             dnsServers: Seq[String] = Seq.empty,
+             dnsSearch: Seq[String] = Seq.empty,
+             dnsOptions: Seq[String] = Seq.empty,
+             name: Option[String] = None,
+             useRunc: Boolean = true,
+             dockerRunParameters: Map[String, Set[String]])(implicit docker: DockerApiWithFileAccess,
+                                                            runc: RuncApi,
+                                                            as: ActorSystem,
+                                                            ec: ExecutionContext,
+                                                            log: Logging): Future[DockerContainer] = {
+    implicit val tid: TransactionId = transid
+
+    val environmentArgs = environment.flatMap {
+      case (key, value) => Seq("-e", s"$key=$value")
+    }
+
+    val params = dockerRunParameters.flatMap {
+      case (key, valueList) => valueList.toList.flatMap(Seq(key, _))
+    }
+
+    // NOTE: --dns-option on modern versions of docker, but is --dns-opt on docker 1.12
+    val dnsOptString = if (docker.clientVersion.startsWith("1.12")) { "--dns-opt" } else { "--dns-option" }
+    val args = Seq(
+      "--cpus",
+      cpu.toString,
+      "--memory",
+      s"${memory.toMB}m",
+      "--memory-swap",
+      s"${memory.toMB}m",
+      "--network",
+      network) ++
+      environmentArgs ++
+      dnsServers.flatMap(d => Seq("--dns", d)) ++
+      dnsSearch.flatMap(d => Seq("--dns-search", d)) ++
+      dnsOptions.flatMap(d => Seq(dnsOptString, d)) ++
+      name.map(n => Seq("--name", n)).getOrElse(Seq.empty) ++
+      params
+
+    val registryConfigUrl = registryConfig.map(_.url).getOrElse("")
+    val imageToUse = image.merge.resolveImageName(Some(registryConfigUrl))
+
+    val pulled = image match {
+      case Left(userProvided) if userProvided.tag.map(_ == "latest").getOrElse(true) =>
+        // Iff the image tag is "latest" explicitly (or implicitly because no tag is given at all), failing to pull will
+        // fail the whole container bringup process, because it is expected to pick up the very latest "untagged"
+        // version every time.
+        docker.pull(imageToUse).map(_ => true).recoverWith {
+          case _ => Future.failed(BlackboxStartupError(Messages.imagePullError(imageToUse)))
+        }
+      case Left(_) =>
+        // Iff the image tag is something else than latest, we tolerate an outdated image if one is available locally.
+        // A `docker run` will be tried nonetheless to try to start a container (which will succeed if the image is
+        // already available locally)
+        docker.pull(imageToUse).map(_ => true).recover { case _ => false }
+      case Right(_) =>
+        // Iff we're not pulling at all (OpenWhisk provided image) we act as if the pull was successful.
+        Future.successful(true)
+    }
+
+    for {
+      pullSuccessful <- pulled
+      id <- docker.run(imageToUse, args).recoverWith {
+        case BrokenDockerContainer(brokenId, _) =>
+          // Remove the broken container - but don't wait or check for the result.
+          // If the removal fails, there is nothing we could do to recover from the recovery.
+          docker.rm(brokenId)
+          Future.failed(WhiskContainerStartupError(Messages.resourceProvisionError))
+        case _ =>
+          // Iff the pull was successful, we assume that the error is not due to an image pull error, otherwise
+          // the docker run was a backup measure to try and start the container anyway. If it fails again, we assume
+          // the image could still not be pulled and wasn't available locally.
+          if (pullSuccessful) {
+            Future.failed(WhiskContainerStartupError(Messages.resourceProvisionError))
+          } else {
+            Future.failed(BlackboxStartupError(Messages.imagePullError(imageToUse)))
+          }
+      }
+      ip <- docker.inspectIPAddress(id, network).recoverWith {
+        // remove the container immediately if inspect failed as
+        // we cannot recover that case automatically
+        case _ =>
+          docker.rm(id)
+          Future.failed(WhiskContainerStartupError(Messages.resourceProvisionError))
+      }
+    } yield new DockerContainer(id, ip, useRunc)
+  }
+
 }
 
 /**

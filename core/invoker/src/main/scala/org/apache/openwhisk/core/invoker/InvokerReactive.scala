@@ -146,11 +146,18 @@ class InvokerReactive(
     activationStore.storeAfterCheck(activation, context)(tid, notifier = None)
   }
 
+  private val cpuLimitConfig: CPULimitConfig = loadConfigOrThrow[CPULimitConfig](ConfigKeys.cpu)
+
   /** Creates a ContainerProxy Actor when being called. */
   private val childFactory = (f: ActorRefFactory) =>
-    f.actorOf(
-      ContainerProxy
-        .props(containerFactory.createContainer, ack, store, collectLogs, instance, poolConfig))
+    if (!cpuLimitConfig.controlEnabled)
+      f.actorOf(
+        ContainerProxy
+          .props(containerFactory.createContainer, ack, store, collectLogs, instance, poolConfig))
+    else
+      f.actorOf(
+        ContainerProxy
+          .props(containerFactory.createCPUContainer, ack, store, logsProvider.collectLogs, instance, poolConfig))
 
   val prewarmingConfigs: List[PrewarmingConfig] = {
     ExecManifest.runtimesManifest.stemcells.flatMap {
@@ -161,8 +168,8 @@ class InvokerReactive(
     }.toList
   }
 
-  private val pool =
-    actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs))
+  private val pool = actorSystem.actorOf(
+    ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs, instance.cpuThreads))
 
   /** Is called when an ActivationMessage is read from Kafka */
   def processActivationMessage(bytes: Array[Byte]): Future[Unit] = {
