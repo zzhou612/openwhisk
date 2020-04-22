@@ -62,7 +62,7 @@ class DockerContainerFactory(instance: InvokerInstanceId,
                                actionImage: ExecManifest.ImageName,
                                userProvidedImage: Boolean,
                                memory: ByteSize,
-                               cpuShares: Int)(implicit config: WhiskConfig, logging: Logging): Future[Container] = {
+                               cpus: Double)(implicit config: WhiskConfig, logging: Logging): Future[Container] = {
     val registryConfig =
       ContainerFactory.resolveRegistryConfig(userProvidedImage, runtimesRegistryConfig, userImagesRegistryConfig)
     val image = if (userProvidedImage) Left(actionImage) else Right(actionImage)
@@ -71,7 +71,7 @@ class DockerContainerFactory(instance: InvokerInstanceId,
       image = image,
       registryConfig = Some(registryConfig),
       memory = memory,
-      cpuShares = cpuShares,
+      cpus = cpus,
       environment = Map("__OW_API_HOST" -> config.wskApiHost) ++ containerArgsConfig.extraEnvVarMap,
       network = containerArgsConfig.network,
       dnsServers = containerArgsConfig.dnsServers,

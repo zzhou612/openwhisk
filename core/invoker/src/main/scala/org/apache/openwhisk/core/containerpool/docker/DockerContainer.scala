@@ -44,13 +44,30 @@ object DockerContainer {
 
   private val byteStringSentinel = ByteString(Container.ACTIVATION_LOG_SENTINEL)
 
+  /** Update docker container. */
+  def update(transid: TransactionId,
+             id: ContainerId,
+             args: Seq[String])(implicit docker: DockerApiWithFileAccess,
+                                runc: RuncApi,
+                                as: ActorSystem,
+                                ec: ExecutionContext,
+                                logging: Logging): Future[Unit] = {
+    implicit val tid: TransactionId = transid
+    logging.info(this, s"update container ${id.asString} with ${args.mkString(" ")}")
+    docker.update(id, args).recoverWith {
+      case _ => 
+        logging.error(this, s"update container ${id.asString} failed")
+        Future.successful({})
+    }
+  }
+
   /**
    * Creates a container running on a docker daemon.
    *
    * @param transid transaction creating the container
    * @param image either a user provided (Left) or OpenWhisk provided (Right) image
    * @param memory memorylimit of the container
-   * @param cpuShares sharefactor for the container
+   * @param cpus available CPU resources the container can use
    * @param environment environment variables to set on the container
    * @param network network to launch the container in
    * @param dnsServers list of dns servers to use in the container
@@ -62,7 +79,7 @@ object DockerContainer {
              image: Either[ImageName, ImageName],
              registryConfig: Option[RuntimesRegistryConfig] = None,
              memory: ByteSize = 256.MB,
-             cpuShares: Int = 0,
+             cpus: Double = 1.0,
              environment: Map[String, String] = Map.empty,
              network: String = "bridge",
              dnsServers: Seq[String] = Seq.empty,
@@ -88,8 +105,8 @@ object DockerContainer {
     // NOTE: --dns-option on modern versions of docker, but is --dns-opt on docker 1.12
     val dnsOptString = if (docker.clientVersion.startsWith("1.12")) { "--dns-opt" } else { "--dns-option" }
     val args = Seq(
-      "--cpu-shares",
-      cpuShares.toString,
+      "--cpus",
+      cpus.toString,
       "--memory",
       s"${memory.toMB}m",
       "--memory-swap",
@@ -189,6 +206,11 @@ class DockerContainer(protected val id: ContainerId,
   override def destroy()(implicit transid: TransactionId): Future[Unit] = {
     super.destroy()
     docker.rm(id)
+  }
+
+  /** Update docker container. */
+  override def update(args: Seq[String])(implicit transid: TransactionId): Future[Unit] = {
+    DockerContainer.update(transid, id, args)
   }
 
   /**

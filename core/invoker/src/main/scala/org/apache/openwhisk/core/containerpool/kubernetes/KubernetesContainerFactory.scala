@@ -71,7 +71,7 @@ class KubernetesContainerFactory(
                                actionImage: ImageName,
                                userProvidedImage: Boolean,
                                memory: ByteSize,
-                               cpuShares: Int)(implicit config: WhiskConfig, logging: Logging): Future[Container] = {
+                               cpus: Double)(implicit config: WhiskConfig, logging: Logging): Future[Container] = {
     val image = actionImage.resolveImageName(Some(
       ContainerFactory.resolveRegistryConfig(userProvidedImage, runtimesRegistryConfig, userImagesRegistryConfig).url))
 

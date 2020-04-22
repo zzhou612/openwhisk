@@ -63,7 +63,8 @@ case class DockerClientTimeoutConfig(run: Duration,
                                      pause: Duration,
                                      unpause: Duration,
                                      version: Duration,
-                                     inspect: Duration)
+                                     inspect: Duration,
+                                     update: Duration)
 
 /**
  * Configuration for docker client
@@ -156,6 +157,9 @@ class DockerClient(dockerHost: Option[String] = None,
         }
     }
   }
+
+  def update(id: ContainerId, args: Seq[String]) (implicit transid: TransactionId): Future[Unit] =
+    runCmd(Seq("update") ++ args ++ Seq(id.asString), config.timeouts.update).map(_ => ())
 
   def inspectIPAddress(id: ContainerId, network: String)(implicit transid: TransactionId): Future[ContainerAddress] =
     runCmd(
@@ -267,6 +271,15 @@ trait DockerApi {
    * @return a Future completing according to the command's exit-code
    */
   def rm(id: ContainerId)(implicit transid: TransactionId): Future[Unit]
+
+  /**
+   * Update the container with the given id.
+   *
+   * @param id the id of the container to remove
+   * @param args arguments for the docker update command
+   * @return a Future completing according to the command's exit-code
+   */
+  def update(id: ContainerId, args: Seq[String]) (implicit transid: TransactionId): Future[Unit]
 
   /**
    * Returns a list of ContainerIds in the system.

@@ -29,6 +29,7 @@ import spray.json.DefaultJsonProtocol
 case class InvokerInstanceId(val instance: Int,
                              uniqueName: Option[String] = None,
                              displayedName: Option[String] = None,
+                             val userCPU: Double = CPULimit.MAX_CPU,
                              val userMemory: ByteSize)
     extends InstanceId {
   def toInt: Int = instance
@@ -51,7 +52,7 @@ case class ControllerInstanceId(asString: String) extends InstanceId {
 
 object InvokerInstanceId extends DefaultJsonProtocol {
   import org.apache.openwhisk.core.entity.size.{serdes => xserds}
-  implicit val serdes = jsonFormat(InvokerInstanceId.apply, "instance", "uniqueName", "displayedName", "userMemory")
+  implicit val serdes = jsonFormat(InvokerInstanceId.apply, "instance", "uniqueName", "displayedName", "userCPU", "userMemory")
 }
 
 object ControllerInstanceId extends DefaultJsonProtocol {

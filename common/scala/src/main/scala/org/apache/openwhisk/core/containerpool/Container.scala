@@ -109,6 +109,11 @@ trait Container {
     closeConnections(httpConnection)
   }
 
+  /** Update container. */
+  def update(args: Seq[String])(implicit transid: TransactionId): Future[Unit] = {
+    Future.successful({})
+  }
+
   /** Initializes code in the container. */
   def initialize(initializer: JsObject, timeout: FiniteDuration, maxConcurrent: Int)(
     implicit transid: TransactionId): Future[Interval] = {
@@ -154,7 +159,18 @@ trait Container {
           environment: JsObject,
           timeout: FiniteDuration,
           maxConcurrent: Int,
+          cpuLimit: Double,
+          updateDocker: Boolean,
           reschedule: Boolean = false)(implicit transid: TransactionId): Future[(Interval, ActivationResponse)] = {
+    if(updateDocker) {
+      var start_ns = System.nanoTime
+      val cpuUpdateArgs: Seq[String] = Seq(
+        "--cpus",
+        cpuLimit.toString)
+      update(cpuUpdateArgs)
+      logging.warn(this, s"docker update ${cpuUpdateArgs} time = ${(System.nanoTime - start_ns)/1000000.0}ms")
+    }
+
     val actionName = environment.fields.get("action_name").map(_.convertTo[String]).getOrElse("")
     val start =
       transid.started(

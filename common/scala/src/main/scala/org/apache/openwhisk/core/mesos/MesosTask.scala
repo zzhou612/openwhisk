@@ -76,7 +76,7 @@ object MesosTask {
              image: String,
              userProvidedImage: Boolean = false,
              memory: ByteSize = 256.MB,
-             cpuShares: Int = 0,
+             cpus: Double = 0,
              environment: Map[String, String] = Map.empty,
              network: String = "bridge",
              dnsServers: Seq[String] = Seq.empty,
@@ -87,7 +87,7 @@ object MesosTask {
                                                        as: ActorSystem): Future[Container] = {
     implicit val tid = transid
 
-    val mesosCpuShares = cpuShares / 1024.0 // convert openwhisk (docker based) shares to mesos (cpu percentage)
+    val mesosCpuShares = cpus / 1024.0 // convert openwhisk (docker based) shares to mesos (cpu percentage)
     val mesosRam = memory.toMB.toInt
 
     val taskId = taskIdGenerator()

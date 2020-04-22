@@ -41,6 +41,7 @@ import org.apache.openwhisk.core.entity.types.EntityStore
  * limit optional so that it is convenient to override just one limit at a time.
  */
 case class ActionLimitsOption(timeout: Option[TimeLimit],
+                              cpu: Option[CPULimit],
                               memory: Option[MemoryLimit],
                               logs: Option[LogLimit],
                               concurrency: Option[ConcurrencyLimit])
@@ -286,6 +287,24 @@ case class ExecutableWhiskAction(namespace: EntityPath,
 
   require(exec != null, "exec undefined")
   require(limits != null, "limits undefined")
+
+  /**
+    * Override equals 
+    * fix ContainerPool.schedule container matching for updated action
+    */
+  override def equals(o: Any) = o match {
+    case ExecutableWhiskAction(
+      `namespace`,
+      `name`,
+      `exec`,
+      `parameters`,
+      _,
+      _,
+      `publish`,
+      `annotations`,
+      `binding`) => true
+    case _ => false
+  }
 
   /**
    * Gets initializer for action. This typically includes the code to execute,
@@ -639,7 +658,7 @@ object WhiskActionMetaData
 }
 
 object ActionLimitsOption extends DefaultJsonProtocol {
-  implicit val serdes = jsonFormat4(ActionLimitsOption.apply)
+  implicit val serdes = jsonFormat5(ActionLimitsOption.apply)
 }
 
 object WhiskActionPut extends DefaultJsonProtocol {

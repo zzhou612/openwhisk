@@ -414,6 +414,7 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     val limits = content.limits map { l =>
       ActionLimits(
         l.timeout getOrElse TimeLimit(),
+        l.cpu getOrElse CPULimit(),
         l.memory getOrElse MemoryLimit(),
         l.logs getOrElse LogLimit(),
         l.concurrency getOrElse ConcurrencyLimit())
@@ -506,6 +507,7 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     val limits = content.limits map { l =>
       ActionLimits(
         l.timeout getOrElse action.limits.timeout,
+        l.cpu getOrElse action.limits.cpu,
         l.memory getOrElse action.limits.memory,
         l.logs getOrElse action.limits.logs,
         l.concurrency getOrElse action.limits.concurrency)
