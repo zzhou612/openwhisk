@@ -40,6 +40,9 @@ import org.apache.openwhisk.core.containerpool.logging.LogLine
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
 import org.apache.openwhisk.http.Messages
 
+import java.nio.file.{Paths, Files}
+import scala.io.{Source=>FSource}
+
 object DockerContainer {
 
   private val byteStringSentinel = ByteString(Container.ACTIVATION_LOG_SENTINEL)
@@ -197,6 +200,8 @@ class DockerContainer(protected val id: ContainerId,
   protected val waitForOomState: FiniteDuration = 2.seconds
   protected val filePollInterval: FiniteDuration = 5.milliseconds
 
+  protected val dockerCPUFilePath: String = "/sys/fs/cgroup/cpu/docker/" + id.asString + "/cpuacct.usage"
+
   override def suspend()(implicit transid: TransactionId): Future[Unit] = {
     super.suspend().flatMap(_ => if (useRunc) runc.pause(id) else docker.pause(id))
   }
@@ -232,6 +237,20 @@ class DockerContainer(protected val id: ContainerId,
     }
   }
 
+  protected def getDockerCPUUsage(): Long = {
+    val cpuFileExists = Files.exists(Paths.get(dockerCPUFilePath))
+    if (!cpuFileExists) {
+      logging.error(this, s"file /cpu/docker/${id.asString}/cpuacct.usage does not exist")
+    }
+    val bufferedSource = FSource.fromFile(dockerCPUFilePath)
+    val lines = bufferedSource.getLines.toArray
+    var cpu: Long = 0
+    if(lines.size == 1)
+      cpu = lines(0).toLong
+    bufferedSource.close
+    cpu
+  }
+
   override protected def callContainer(
     path: String,
     body: JsObject,
@@ -240,6 +259,10 @@ class DockerContainer(protected val id: ContainerId,
     retry: Boolean = false,
     reschedule: Boolean = false)(implicit transid: TransactionId): Future[RunResult] = {
     val started = Instant.now()
+
+    val startSystemNano = System.nanoTime()
+    val startDockerNano = getDockerCPUUsage()
+
     val http = httpConnection.getOrElse {
       val conn = if (Container.config.akkaClient) {
         new AkkaContainerClient(addr.host, addr.port, timeout, ActivationEntityLimit.MAX_ACTIVATION_ENTITY_LIMIT, 1024)
@@ -259,6 +282,11 @@ class DockerContainer(protected val id: ContainerId,
       .flatMap { response =>
         val finished = Instant.now()
 
+        val finishSystemNano = System.nanoTime()
+        val finishDockerNano = getDockerCPUUsage()
+        val cpuUtil: Double = ((finishDockerNano - startDockerNano).toDouble / (finishSystemNano - startSystemNano).toDouble * 1000).round / 1000.toDouble
+        logging.info(this, s"container ${id.asString} cpu util = ${cpuUtil}")
+
         response.left
           .map {
             // Only check for memory exhaustion if there was a
@@ -271,7 +299,7 @@ class DockerContainer(protected val id: ContainerId,
             case other => Future.successful(other)
           }
           .fold(_.map(Left(_)), right => Future.successful(Right(right)))
-          .map(res => RunResult(Interval(started, finished), res))
+          .map(res => RunResult(Interval(started, finished), res, cpuUtil))
       }
   }
 

@@ -779,7 +779,7 @@ class ContainerProxy(factory: (TransactionId,
             updateDocker,
             reschedule)(job.msg.transid)
           .map {
-            case (runInterval, response) =>
+            case (runInterval, response, cpuUtil) =>
               val initRunInterval = initInterval
                 .map(i => Interval(runInterval.start.minusMillis(i.duration.toMillis), runInterval.end))
                 .getOrElse(runInterval)
@@ -788,7 +788,8 @@ class ContainerProxy(factory: (TransactionId,
                 initInterval,
                 initRunInterval,
                 runInterval.duration >= actionTimeout,
-                response)
+                response,
+                cpuUtil)
           }
       }
       .recoverWith {
@@ -954,7 +955,8 @@ object ContainerProxy {
                                initInterval: Option[Interval],
                                totalInterval: Interval,
                                isTimeout: Boolean,
-                               response: ActivationResponse) = {
+                               response: ActivationResponse,
+                               cpuUtil: Double = 0.0) = {
     val causedBy = Some {
       if (job.msg.causedBySequence) {
         Parameters(WhiskActivation.causedByAnnotation, JsString(Exec.SEQUENCE))
@@ -996,7 +998,8 @@ object ContainerProxy {
           Parameters(WhiskActivation.kindAnnotation, JsString(job.action.exec.kind)) ++
           Parameters(WhiskActivation.timeoutAnnotation, JsBoolean(isTimeout)) ++
           causedBy ++ initTime ++ binding
-      })
+      },
+      cpuUtil = cpuUtil)
   }
 
   /**

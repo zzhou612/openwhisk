@@ -193,10 +193,11 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
 
     // Grow the underlying status sequence to the size needed to contain the incoming ping. Dummy values are created
     // to represent invokers, where ping messages haven't arrived yet
+    val userCPU = Runtime.getRuntime.availableProcessors.toDouble
     status = padToIndexed(
       status,
       instanceId.toInt + 1,
-      i => new InvokerHealth(InvokerInstanceId(i, userMemory = instanceId.userMemory), Offline))
+      i => new InvokerHealth(InvokerInstanceId(i, userCPU = userCPU, userMemory = instanceId.userMemory), Offline))
     status = status.updated(instanceId.toInt, new InvokerHealth(instanceId, Offline))
 
     val ref = childFactory(context, instanceId)

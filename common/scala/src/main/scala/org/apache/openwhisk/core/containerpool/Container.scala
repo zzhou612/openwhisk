@@ -161,14 +161,14 @@ trait Container {
           maxConcurrent: Int,
           cpuLimit: Double,
           updateDocker: Boolean,
-          reschedule: Boolean = false)(implicit transid: TransactionId): Future[(Interval, ActivationResponse)] = {
+          reschedule: Boolean = false)(implicit transid: TransactionId): Future[(Interval, ActivationResponse, Double)] = {
     if(updateDocker) {
       var start_ns = System.nanoTime
       val cpuUpdateArgs: Seq[String] = Seq(
         "--cpus",
         cpuLimit.toString)
       update(cpuUpdateArgs)
-      logging.warn(this, s"docker update ${cpuUpdateArgs} time = ${(System.nanoTime - start_ns)/1000000.0}ms")
+      logging.warn(this, s"docker update ${cpuUpdateArgs} time = ${(System.nanoTime - start_ns) / 1000000.0}ms")
     }
 
     val actionName = environment.fields.get("action_name").map(_.convertTo[String]).getOrElse("")
@@ -200,7 +200,7 @@ trait Container {
           ActivationResponse.processRunResponseContent(result.response, logging)
         }
 
-        (result.interval, response)
+        (result.interval, response, result.cpuUtil)
       }
   }
 
@@ -231,7 +231,7 @@ trait Container {
       .post(path, body, retry, reschedule)
       .map { response =>
         val finished = Instant.now()
-        RunResult(Interval(started, finished), response)
+        RunResult(Interval(started, finished), response, 0.0)
       }
   }
   private def openConnections(timeout: FiniteDuration, maxConcurrent: Int) = {
@@ -276,7 +276,7 @@ case class Interval(start: Instant, end: Instant) {
   def duration = Duration.create(end.toEpochMilli() - start.toEpochMilli(), MILLISECONDS)
 }
 
-case class RunResult(interval: Interval, response: Either[ContainerConnectionError, ContainerResponse]) {
+case class RunResult(interval: Interval, response: Either[ContainerConnectionError, ContainerResponse], cpuUtil: Double) {
   def ok = response.exists(_.ok)
   def toBriefString = response.fold(_.toString, _.toString)
 }
