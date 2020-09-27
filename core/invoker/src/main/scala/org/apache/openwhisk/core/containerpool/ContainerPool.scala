@@ -393,7 +393,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
    * @return true, if there is enough space for the given amount of memory.
    */
   def hasPoolSpaceFor[A](pool: Map[A, ContainerData], cpu: Double, memory: ByteSize): Boolean = {
-    // logging.warn(this, s"userCPU=${userCPU} userMemory=${poolConfig.userMemory.toMB}")
+    logging.warn(this, s"cpuConsumption=${cpuConsumptionOf(pool) + cpu} userCPU=${userCPU} memoryConsumption=${memoryConsumptionOf(pool) + memory.toMB} userMemory=${poolConfig.userMemory.toMB}")
     // true
     cpuConsumptionOf(pool) + cpu <= userCPU && memoryConsumptionOf(pool) + memory.toMB <= poolConfig.userMemory.toMB
   }
