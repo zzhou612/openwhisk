@@ -552,7 +552,7 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
       exec,
       parameters,
       limits,
-      content.version getOrElse action.version.upPatch,
+      content.version getOrElse action.version, // do not up-patch version upon action update
       content.publish getOrElse action.publish,
       WhiskActionsApi.amendAnnotations(content.annotations getOrElse action.annotations, exec, create = false))
       .revision[WhiskAction](action.docinfo.rev)
